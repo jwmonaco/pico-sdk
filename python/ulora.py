@@ -34,7 +34,7 @@ REG_0D_FIFO_ADDR_PTR = 0x0d
 
 PA_DAC_ENABLE = 0x07
 PA_DAC_DISABLE = 0x04
-PA_SELECT = 0xc0
+PA_SELECT = 0x80
 
 CAD_DETECTED_MASK = 0x01
 RX_DONE = 0x40
@@ -42,11 +42,11 @@ TX_DONE = 0x08
 CAD_DONE = 0x04
 CAD_DETECTED = 0x01
 
-LONG_RANGE_MODE = 0x88
+LONG_RANGE_MODE = 0x80
 MODE_SLEEP = 0x00
-MODE_STDBY = (LONG_RANGE_MODE | 0x01)
+MODE_STDBY = 0x01
 MODE_TX = 0x03
-MODE_RXCONTINUOUS = (LONG_RANGE_MODE | 0x05)
+MODE_RXCONTINUOUS = 0x05
 MODE_CAD = 0x07
 
 REG_09_PA_CONFIG = 0x09
@@ -302,15 +302,12 @@ def dumpCfg(lora):
     regName = f"REGSYNCWORD(0x{0x39:02x})"
     print(f"{regName:>{maxRegLen}}: 0x{REGSYNCWORD:02x}")
 
-
 class ModemConfig():
     Bw125Cr45Sf128 = (0x72, 0x74, 0x04) #< Bw = 125 kHz, Cr = 4/5, Sf = 128chips/symbol, CRC on. Default medium range
     Bw500Cr45Sf128 = (0x92, 0x74, 0x04) #< Bw = 500 kHz, Cr = 4/5, Sf = 128chips/symbol, CRC on. Fast+short range
     Bw31_25Cr48Sf512 = (0x48, 0x94, 0x04) #< Bw = 31.25 kHz, Cr = 4/8, Sf = 512chips/symbol, CRC on. Slow+long range
     Bw125Cr48Sf4096 = (0x78, 0xc4, 0x0c) #/< Bw = 125 kHz, Cr = 4/8, Sf = 4096chips/symbol, low data rate, CRC on. Slow+long range
     Bw125Cr45Sf2048 = (0x72, 0xb4, 0x04) #< Bw = 125 kHz, Cr = 4/5, Sf = 2048chips/symbol, CRC on. Slow+long range
-    Lorawan = (0x72, 0xa4, 0x04)
-
 
 class SPIConfig():
     # spi pin defs for various boards (channel, sck, mosi, miso)
@@ -386,15 +383,11 @@ class LoRa(object):
         # set mode
         self._spi_write(REG_01_OP_MODE, MODE_SLEEP | LONG_RANGE_MODE)
         time.sleep(0.1)
-
-
+        
         # check if mode is set
         assert self._spi_read(REG_01_OP_MODE) == (MODE_SLEEP | LONG_RANGE_MODE), \
             "LoRa initialization failed"
-        
-        self._spi_write(0x33, 0x67)
-        self._spi_write(0x39, 0x34)
-        
+
         self._spi_write(REG_0E_FIFO_TX_BASE_ADDR, 0)
         self._spi_write(REG_0F_FIFO_RX_BASE_ADDR, 0)
         
@@ -576,8 +569,6 @@ class LoRa(object):
 
     def _handle_interrupt(self, channel):
         irq_flags = self._spi_read(REG_12_IRQ_FLAGS)
-
-        print(f"Got an interrupt -> {irq_flags}")
 
         if self._mode == MODE_RXCONTINUOUS and (irq_flags & RX_DONE):
             packet_len = self._spi_read(REG_13_RX_NB_BYTES)
