@@ -424,7 +424,7 @@ class LoRa(object):
         self._spi_write(REG_09_PA_CONFIG, PA_SELECT | (self._tx_power - 5))
 
         # Make it more like lorawan
-        self._spi_write(0x33, 0x67)
+        # self._spi_write(0x33, 0x67)
         
     def on_recv(self, message):
         # This should be overridden by the user
@@ -573,6 +573,8 @@ class LoRa(object):
 
     def _handle_interrupt(self, channel):
         irq_flags = self._spi_read(REG_12_IRQ_FLAGS)
+
+        print(f"Handling interrupt with {irq_flags:02x}")
 
         if self._mode == MODE_RXCONTINUOUS and (irq_flags & RX_DONE):
             packet_len = self._spi_read(REG_13_RX_NB_BYTES)
