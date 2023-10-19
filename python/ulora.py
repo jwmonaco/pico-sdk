@@ -422,6 +422,9 @@ class LoRa(object):
             self._spi_write(REG_4D_PA_DAC, PA_DAC_DISABLE)
 
         self._spi_write(REG_09_PA_CONFIG, PA_SELECT | (self._tx_power - 5))
+
+        # Make it more like lorawan
+        self._spi_write(0x33, 0x67)
         
     def on_recv(self, message):
         # This should be overridden by the user
