@@ -425,6 +425,7 @@ class LoRa(object):
 
         # Make it more like lorawan
         # self._spi_write(0x33, 0x67)
+        self._spi_write(0x39, 0x34)
         
     def on_recv(self, message):
         # This should be overridden by the user
@@ -574,7 +575,7 @@ class LoRa(object):
     def _handle_interrupt(self, channel):
         irq_flags = self._spi_read(REG_12_IRQ_FLAGS)
 
-        print(f"Handling interrupt with {irq_flags:02x}")
+        print(f"Handling interrupt with 0x{irq_flags:02x}")
 
         if self._mode == MODE_RXCONTINUOUS and (irq_flags & RX_DONE):
             packet_len = self._spi_read(REG_13_RX_NB_BYTES)
@@ -596,12 +597,16 @@ class LoRa(object):
             else:
                 rssi = round(rssi - 164, 2)
 
+            hexpacket = ''.join(f'0x{x:02x} ' for x in packet)
+            print(f"Received a packet of size {packet_len}:{hexpacket}")
+
             if packet_len >= 4:
                 header_to = packet[0]
                 header_from = packet[1]
                 header_id = packet[2]
                 header_flags = packet[3]
                 message = bytes(packet[4:]) if packet_len > 4 else b''
+
 
                 if (self._this_address != header_to) and ((header_to != BROADCAST_ADDRESS) or (self._receive_all is False)):
                     return
