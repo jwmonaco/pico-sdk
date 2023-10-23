@@ -4,6 +4,12 @@ from ucollections import namedtuple
 from urandom import getrandbits
 from machine import SPI
 from machine import Pin
+import ubinascii
+import json
+import machine
+import socket
+import mm_wlan
+import struct
 
 #Constants
 FLAGS_ACK = 0x80
@@ -38,6 +44,7 @@ PA_SELECT = 0x80
 
 CAD_DETECTED_MASK = 0x01
 RX_DONE = 0x40
+CRC_ERROR = 0x20
 TX_DONE = 0x08
 CAD_DONE = 0x04
 CAD_DETECTED = 0x01
@@ -55,6 +62,29 @@ FSTEP = (FXOSC / 524288)
 
 maxRegLen = 23
 maxFieldLen = maxRegLen
+serverIp = '192.168.87.57'
+server_port_up = 1700
+server_port_down = 1700
+
+rtc = machine.RTC()
+def getFormattedTime(now, stat=False) -> str:
+    """Generate an ISO datetime string for the time provided in now
+    
+    now is an 8 tuple used by machine.RTC with the following format:
+
+    (year, month, day, weekday, hours, minutes, seconds, subseconds)
+
+    """
+    #dateformat = "{year}-{month}-{day:02d}-T{hour:02d}:{minute:02d}:{second:02d}.{subsecond}Z"
+    #dateformat = "{year}-{month}-{day:02d} {hour:02d}:{minute:02d}:{second:02d} GMT"
+    #dateformat = "{year}-{month}-{day:02d}-T{hour:02d}:{minute:02d}:{second:02d}"
+    if stat:
+        dateformat = "{year}-{month}-{day:02d} {hour:02d}:{minute:02d}:{second:02d} GMT"
+    else:
+        dateformat = "{year}-{month}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}.{subsecond}Z"
+
+    date = dateformat.format(year=now[0], month=now[1], day=now[2], weekday=now[3], hour=now[4], minute=now[5], second=now[6], subsecond=now[7])
+    return date
 
 def dumpCfg(lora):
     print("-----------------------------------------------")
@@ -302,6 +332,11 @@ def dumpCfg(lora):
     regName = f"REGSYNCWORD(0x{0x39:02x})"
     print(f"{regName:>{maxRegLen}}: 0x{REGSYNCWORD:02x}")
 
+    print("-----------------------------------------------")
+    REGINVERTIQ2 = lora._spi_read(0x3b)
+    regName = f"REGINVERTIQ2(0x{0x3b:02x})"
+    print(f"{regName:>{maxRegLen}}: 0x{REGINVERTIQ2:02x}")
+
 class ModemConfig():
     Bw125Cr45Sf128 = (0x72, 0x74, 0x04) #< Bw = 125 kHz, Cr = 4/5, Sf = 128chips/symbol, CRC on. Default medium range
     Bw500Cr45Sf128 = (0x92, 0x74, 0x04) #< Bw = 500 kHz, Cr = 4/5, Sf = 128chips/symbol, CRC on. Fast+short range
@@ -405,9 +440,10 @@ class LoRa(object):
 
         # set frequency
         frf = int((self._freq * 1000000.0) / FSTEP)
-        self._spi_write(REG_06_FRF_MSB, (frf >> 16) & 0xff)
-        self._spi_write(REG_07_FRF_MID, (frf >> 8) & 0xff)
-        self._spi_write(REG_08_FRF_LSB, frf & 0xff)
+        self.fReg = ((frf >> 16) & 0xff, (frf >> 8) & 0xff, frf & 0xff)
+        self._spi_write(REG_06_FRF_MSB, self.fReg[0])
+        self._spi_write(REG_07_FRF_MID, self.fReg[1])
+        self._spi_write(REG_08_FRF_LSB, self.fReg[2])
         
         # Set tx power
         if self._tx_power < 5:
@@ -424,8 +460,29 @@ class LoRa(object):
         self._spi_write(REG_09_PA_CONFIG, PA_SELECT | (self._tx_power - 5))
 
         # Make it more like lorawan
-        # self._spi_write(0x33, 0x67)
         self._spi_write(0x39, 0x34)
+
+        self.sendsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.gwStatus = {'time': '',
+                         'lati': 46.24,
+                         'long': 3.2523,
+                         'alti': 145,
+                         'rxnb': 0,
+                         'rxok': 0,
+                         'rxfw': 0,
+                         'ackr': 100.0,
+                         'dwnb': 0,
+                         'txnb': 0}
+        self.id = mm_wlan.getmac() + 2*b'\xff'
+        #self.recvsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        #self.recvsock.bind(('0.0.0.0', server_port_down))
+
+
+    def process(self):
+        #(data, address) = self.recvsock.recvfrom(4096)
+
+        print("Received a packet of size {len(data)} . . . now what?")
+
         
     def on_recv(self, message):
         # This should be overridden by the user
@@ -438,12 +495,16 @@ class LoRa(object):
 
     def set_mode_tx(self):
         if self._mode != MODE_TX:
+            self._spi_write(0x33, 0x26)   
+            self._spi_write(0x3b, 0x19)
             self._spi_write(REG_01_OP_MODE, MODE_TX)
             self._spi_write(REG_40_DIO_MAPPING1, 0x40)  # Interrupt on TxDone
             self._mode = MODE_TX
 
     def set_mode_rx(self):
         if self._mode != MODE_RXCONTINUOUS:
+            self._spi_write(0x33, 0x27)   
+            self._spi_write(0x3b, 0x1d)
             self._spi_write(REG_01_OP_MODE, MODE_RXCONTINUOUS)
             self._spi_write(REG_40_DIO_MAPPING1, 0x00)  # Interrupt on RxDone
             self._mode = MODE_RXCONTINUOUS
@@ -573,11 +634,15 @@ class LoRa(object):
         return encrypted_msg
 
     def _handle_interrupt(self, channel):
+        now = time.ticks_ms()
         irq_flags = self._spi_read(REG_12_IRQ_FLAGS)
 
         print(f"Handling interrupt with 0x{irq_flags:02x}")
 
         if self._mode == MODE_RXCONTINUOUS and (irq_flags & RX_DONE):
+            self.gwStatus['rxnb'] += 1
+            if not (irq_flags & CRC_ERROR):
+                self.gwStatus['rxok'] += 1
             packet_len = self._spi_read(REG_13_RX_NB_BYTES)
             self._spi_write(REG_0D_FIFO_ADDR_PTR, self._spi_read(REG_10_FIFO_RX_CURRENT_ADDR))
 
@@ -598,8 +663,39 @@ class LoRa(object):
                 rssi = round(rssi - 164, 2)
 
             hexpacket = ''.join(f'0x{x:02x} ' for x in packet)
+            print(f"rssi={rssi}, snr={snr}")
             print(f"Received a packet of size {packet_len}:{hexpacket}")
-
+            rawts = rtc.datetime()
+            ts = getFormattedTime(rawts)            
+            self.gwStatus['time'] = getFormattedTime(rawts, stat=True)
+            self.lastRx = now
+            fwd = {"rxpk": [{
+                   'time': ts,
+                   'tmms': (time.time() -  time.mktime((1980, 1, 6, 0, 0, 0, 0, 5)))*1000,
+                   'tmst': now,
+                   'freq': self._freq,
+                   'chan': 0,
+                   'rfch': 0,
+                   'stat': 1,
+                   'modu': 'LORA',
+                   'datr': 'SF10BW125',
+                   'codr': '4/5',
+                   'rssi': int(rssi),
+                   'lsnr': snr,
+                   'size': packet_len,
+                   'data': ubinascii.b2a_base64(packet).strip()
+                   }],
+                   "stat": self.gwStatus}
+            
+            gwPacket = struct.pack('!BHB8s', 2, self.gwStatus['rxfw'], 0, self.id)
+            gwPacket += bytes(json.dumps(fwd), 'utf-8')
+            self.sendsock.sendto(gwPacket, (serverIp, server_port_up))
+            print("Waiting for response from server . . .")
+            (response, address) = self.sendsock.recvfrom(4)
+            print(f"Received {response}")
+            self.gwStatus['rxok'] += 1            
+            self.gwStatus['rxfw'] += 1
+        
             if packet_len >= 4:
                 header_to = packet[0]
                 header_from = packet[1]
@@ -628,7 +724,17 @@ class LoRa(object):
                     self.on_recv(self._last_payload)
 
         elif self._mode == MODE_TX and (irq_flags & TX_DONE):
-            self.set_mode_idle()
+            # self.set_mode_idle()
+
+            # Restore settings
+            self._spi_write(REG_1D_MODEM_CONFIG1, self._modem_config[0])
+            self._spi_write(REG_1E_MODEM_CONFIG2, self._modem_config[1])
+            #self._spi_write(REG_26_MODEM_CONFIG3, self._modem_config[2])
+            self._spi_write(REG_06_FRF_MSB, self.fReg[0])
+            self._spi_write(REG_07_FRF_MID, self.fReg[1])
+            self._spi_write(REG_08_FRF_LSB, self.fReg[2])
+
+            self.set_mode_rx()
 
         elif self._mode == MODE_CAD and (irq_flags & CAD_DONE):
             self._cad = irq_flags & CAD_DETECTED
@@ -638,3 +744,43 @@ class LoRa(object):
 
     def close(self):
         self.spi.deinit()
+
+    def sendMessage(self, message):
+        print(f'Sending {message}')
+        modulation = message['txInfo']['modulation']
+        frequency = message['txInfo']['frequency']
+
+        # Compute new configuration register values
+        Bw = 0x90                              # 500kHz          
+        CodingRate = 0x2                       # 4/5
+        RegModemConfig1 = Bw | CodingRate
+
+        SpreadingFactor = modulation['lora']['spreadingFactor'] << 4
+        RxPayloadCrcOn = 0x4
+        RegModemConfig2 = SpreadingFactor | RxPayloadCrcOn
+
+        # Assuming RegModemConfig3 does not change
+
+        frf = int((frequency) / FSTEP)
+
+        # Setup for transmit
+        self._spi_write(REG_1D_MODEM_CONFIG1, RegModemConfig1)
+        self._spi_write(REG_1E_MODEM_CONFIG2, RegModemConfig2)
+        self._spi_write(REG_06_FRF_MSB, (frf >> 16) & 0xff)
+        self._spi_write(REG_07_FRF_MID, (frf >> 8) & 0xff)
+        self._spi_write(REG_08_FRF_LSB, frf & 0xff)
+
+        # Send packet
+        self.wait_packet_sent()
+        self.set_mode_idle()
+        self.wait_cad()
+        payload =  ubinascii.a2b_base64(message['phyPayload'])
+        self._spi_write(REG_0D_FIFO_ADDR_PTR, 0)
+        self._spi_write(REG_00_FIFO, payload)
+        self._spi_write(REG_22_PAYLOAD_LENGTH, len(payload))
+        self.set_mode_tx()
+
+        dumpCfg(self)
+
+
+
