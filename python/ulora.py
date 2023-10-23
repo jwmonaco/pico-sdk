@@ -344,6 +344,7 @@ class ModemConfig():
     Bw125Cr48Sf4096 = (0x78, 0xc4, 0x0c) #/< Bw = 125 kHz, Cr = 4/8, Sf = 4096chips/symbol, low data rate, CRC on. Slow+long range
     Bw125Cr45Sf2048 = (0x72, 0xb4, 0x04) #< Bw = 125 kHz, Cr = 4/5, Sf = 2048chips/symbol, CRC on. Slow+long range
     lorawan = (0x72, 0xa4, 0x04)
+    gateway = (0x92, 0xc0, 0x04)
 
 class SPIConfig():
     # spi pin defs for various boards (channel, sck, mosi, miso)
