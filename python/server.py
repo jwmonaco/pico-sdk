@@ -57,7 +57,7 @@ while True:
 
 
 # initialise radio
-lora = ulora.LoRa(RFM95_SPIBUS, RFM95_INT, SERVER_ADDRESS, RFM95_CS, reset_pin=RFM95_RST, freq=RF95_FREQ, tx_power=RF95_POW, acks=True, modem_config=RF95CFG)
+lora = ulora.LoRa(RFM95_SPIBUS, RFM95_INT, SERVER_ADDRESS, RFM95_CS, reset_pin=RFM95_RST, freq=RF95_FREQ, tx_power=RF95_POW, acks=True, modem_config=RF95CFG, inverted=True)
 
 # set callback
 lora.on_recv = on_recv

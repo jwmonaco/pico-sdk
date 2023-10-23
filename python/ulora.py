@@ -356,7 +356,7 @@ class SPIConfig():
 
 class LoRa(object):
     def __init__(self, spi_channel, interrupt, this_address, cs_pin, reset_pin=None, freq=868.0, tx_power=14,
-                 modem_config=ModemConfig.Bw125Cr45Sf128, receive_all=False, acks=False, crypto=None):
+                 modem_config=ModemConfig.Bw125Cr45Sf128, receive_all=False, acks=False, crypto=None, inverted=True):
         """
         Lora(channel, interrupt, this_address, cs_pin, reset_pin=None, freq=868.0, tx_power=14,
                  modem_config=ModemConfig.Bw125Cr45Sf128, receive_all=False, acks=False, crypto=None)
@@ -384,6 +384,7 @@ class LoRa(object):
         self._modem_config = modem_config
         self._receive_all = receive_all
         self._acks = acks
+        self.inverted = inverted
 
         self._this_address = this_address
         self._last_header_id = 0
@@ -496,16 +497,24 @@ class LoRa(object):
 
     def set_mode_tx(self):
         if self._mode != MODE_TX:
-            self._spi_write(0x33, 0x26)   
-            self._spi_write(0x3b, 0x19)
+            if self.inverted:
+                self._spi_write(0x33, 0x26)   
+                self._spi_write(0x3b, 0x19)
+            else:
+                self._spi_write(0x33, 0x27)   
+                self._spi_write(0x3b, 0x1d)
             self._spi_write(REG_01_OP_MODE, MODE_TX)
             self._spi_write(REG_40_DIO_MAPPING1, 0x40)  # Interrupt on TxDone
             self._mode = MODE_TX
 
     def set_mode_rx(self):
         if self._mode != MODE_RXCONTINUOUS:
-            self._spi_write(0x33, 0x27)   
-            self._spi_write(0x3b, 0x1d)
+            if self.inverted:
+                self._spi_write(0x33, 0x67)   
+                self._spi_write(0x3b, 0x19)
+            else:
+                self._spi_write(0x33, 0x27)   
+                self._spi_write(0x3b, 0x1d)
             self._spi_write(REG_01_OP_MODE, MODE_RXCONTINUOUS)
             self._spi_write(REG_40_DIO_MAPPING1, 0x00)  # Interrupt on RxDone
             self._mode = MODE_RXCONTINUOUS

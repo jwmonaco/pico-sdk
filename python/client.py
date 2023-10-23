@@ -13,7 +13,7 @@ SERVER_ADDRESS = 2
 RF95CFG = ulora.ModemConfig.gateway
 
 # initialise radio
-lora = ulora.LoRa(RFM95_SPIBUS, RFM95_INT, CLIENT_ADDRESS, RFM95_CS, reset_pin=RFM95_RST, freq=RF95_FREQ, tx_power=RF95_POW, acks=True, modem_config=RF95CFG)
+lora = ulora.LoRa(RFM95_SPIBUS, RFM95_INT, CLIENT_ADDRESS, RFM95_CS, reset_pin=RFM95_RST, freq=RF95_FREQ, tx_power=RF95_POW, acks=True, modem_config=RF95CFG, inverted=True)
 
 
 # loop and send data
