@@ -1,8 +1,24 @@
-# MicroPython lora simple_rxtx example - synchronous API version
-# MIT license; Copyright (c) 2023 Angus Gratton
 import time
+from lora import SX1276
+import ntptime
+import mm_wlan
+import json
+from umqtt import MQTTClient
+from machine import Timer
 from machine import Pin, SPI
+from machine import RTC
+import socket
+import struct
+import ubinascii
+import _thread
 
+verbose = 1 
+human = 1
+AppKey = "000102030405060708090a0b0c0d0e0f"
+
+serverIp = '192.168.87.57'
+server_port_up = 1700
+server_port_down = 1700
 maxRegLen = 23
 maxFieldLen = maxRegLen
 REG_00_FIFO = 0x00
@@ -29,6 +45,86 @@ REG_40_DIO_MAPPING1 = 0x40
 REG_0D_FIFO_ADDR_PTR = 0x0d
 REG_09_PA_CONFIG = 0x09
 
+FtypeTable = ['Join-Request',
+              'Join-Accept',
+              'unconfirmed data uplink',
+              'unconfirmed data downlink',
+              'confirmed data uplink',
+              'confirmed data downlink',
+              'RFU',
+              'Proprietary'
+              ]
+
+MajorTable = ['LoRaWAN R1', 'RFU', 'RFU', 'RFU']
+DevNonce = None
+JoinEUI = None
+DevEUI = None
+JoinNonce = None
+NetID = None
+DevAddr = None
+
+def dumpMacFrame(frame):
+    global DevNonce
+    global JoinEUI
+    global DevEUI
+    global JoinNonce
+    global NetID
+    global DevAddr
+
+    retval = False
+    raw = bytes(frame)
+    maxMacLen = 8
+    MHDR = raw[0]
+    FType = MHDR >> 5 & 0x7
+    RFU = MHDR >> 2 & 0x7
+    Major = MHDR & 0x3
+    (MIC,) = struct.unpack("I", raw[-4:])
+    print(f"* {'MHDR':>{maxMacLen}}: {FType:03b}|{RFU:03b}|{Major:02b}")
+    if human:
+        print(f"* {'':>{maxMacLen}}  {FtypeTable[FType]}|{RFU:03b}|{MajorTable[Major]}")
+    payload = raw[1:-3]
+
+    if FType == 0:
+        (JoinEUI,) = struct.unpack("Q", payload[0:8])
+        (DevEUI,) = struct.unpack("Q", payload[8:16])
+        (DevNonce,) = struct.unpack("H", payload[16:18])
+        print(f"* {'Join':>{maxMacLen}}: 0x{JoinEUI:016x}|0x{DevEUI:016x}|0x{DevNonce:04x}")
+    elif FType == 1:
+        JoinNonce = payload[0:3]
+        NetID = payload[3:6]
+        (DevAddr,) = struct.unpack("I", payload[6:10])
+        DLSettings = payload[10]
+        CFList = payload[11:]
+        # Need AES decryption routines in python to make this work
+        #print(f"* {'Accept':>{maxMacLen}}: 0x{JoinNonce.hex()}|0x{NetID.hex()}|0x{DevAddr:04x}|0x{DLSettings:02x}|0x{CFList.hex()}")
+    else:
+        (DevAddr,) = struct.unpack("I", payload[0:4])
+        FCtrl = payload[4]
+        (FCnt,) = struct.unpack("H", payload[5:7])
+        FOptsLen = FCtrl & 0xf
+        if FOptsLen:
+            FOpts = payload[7:7+FOptsLen]
+            print(f"* {'FHDR':>{maxMacLen}}: 0x{DevAddr:08x}|0x{FCtrl:02x}|{FCnt}|0x{FOpts.hex()}")
+            payload = payload[(7+FOptsLen):]
+        else:
+            FOpts = None
+            print(f"* {'FHDR':>{maxMacLen}}: 0x{DevAddr:08x}|0x{FCtrl:02x}|{FCnt}")
+            payload = payload[7:]
+    
+        if payload:
+            FPort = payload[0]
+            payload = payload[1:]
+            print(f"* {'FPort':>{maxMacLen}}: 0x{FPort:02x}")
+        
+        if payload:
+            print(f"* {'FRMPay':>{maxMacLen}}: 0x{payload.hex()}")
+
+        #retval = FType == 3
+
+    print(f"* {'MIC':>{maxMacLen}}: 0x{MIC:08x}")
+    return retval
+
+        
 def dumpCfg(lora):
     print("-----------------------------------------------")
     OP_MODE = lora._reg_read(REG_01_OP_MODE)
@@ -280,54 +376,188 @@ def dumpCfg(lora):
     regName = f"REGINVERTIQ2(0x{0x3b:02x})"
     print(f"{regName:>{maxRegLen}}: 0x{REGINVERTIQ2:02x}")
 
-
-def get_modem():
-    from lora import SX1276
+rtc = RTC()
+def getFormattedTime(now, stat=False) -> str:
+    """Generate an ISO datetime string for the time provided in now
     
-    lora_cfg = {
-       "freq_khz": 923300,
+    now is an 8 tuple used by machine.RTC with the following format:
+
+    (year, month, day, weekday, hours, minutes, seconds, subseconds)
+
+    """
+    #dateformat = "{year}-{month}-{day:02d}-T{hour:02d}:{minute:02d}:{second:02d}.{subsecond}Z"
+    #dateformat = "{year}-{month}-{day:02d} {hour:02d}:{minute:02d}:{second:02d} GMT"
+    #dateformat = "{year}-{month}-{day:02d}-T{hour:02d}:{minute:02d}:{second:02d}"
+    if stat:
+        dateformat = "{year}-{month}-{day:02d} {hour:02d}:{minute:02d}:{second:02d} GMT"
+    else:
+        dateformat = "{year}-{month}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}.{subsecond}Z"
+
+    date = dateformat.format(year=now[0], month=now[1], day=now[2], weekday=now[3], hour=now[4], minute=now[5], second=now[6], subsecond=now[7])
+    return date
+
+lora_cfg = {
+       "freq_khz": 902300,
        "sf": 10,
-       "bw": "500",  # kHz
+       "bw": "125",  # kHz
        "coding_rate": 5,
        "preamble_len": 8,
        "output_power": 0,  # dBm
+       "syncword": 0x34,
        "invert_iq_tx": True,
        "invert_iq_rx": False
-    }
-    
+}
+
+def get_modem():
+    from lora import SX1276
+       
     return SX1276(
         spi=SPI(0, baudrate=2000_000, polarity=0, phase=0,
                 miso=Pin(4), mosi=Pin(7), sck=Pin(6)),
         cs=Pin(5),
         dio0=Pin(28),
         dio1=Pin(10),
-        reset=Pin(27),
-        lora_cfg=lora_cfg,
-    )
+        reset=Pin(27))
+
+sendFifo = []
+
+def sendNextOnFifo(arg):
+    global sendFifo
+    global lora
+    message = sendFifo.pop(0)
+    sendCfg = {'freq_khz': int(message['txInfo']['frequency']/1000),
+               'bw': int(message['txInfo']['modulation']['lora']['bandwidth']/1000),
+               'sf': message['txInfo']['modulation']['lora']['spreadingFactor']}
+    
+    lora.configure(sendCfg)
+    packet = ubinascii.a2b_base64(message['phyPayload'])
+    lora.prepare_send(packet)
+    will_irq = lora.start_send()
+    now = time.ticks_ms()
+    elapsed = now - lastRx
+    time.sleep_ms(lora.get_time_on_air_us(len(packet))//1000)
+    tx = True
+    while tx is True:
+        tx = lora.poll_send()
+        lora._sync_wait(will_irq)
+
+    # lora.send(ubinascii.a2b_base64(message['phyPayload']))
+    print(f"Sent payload with delay {elapsed} ms, {len(sendFifo)} remain")
+    if verbose:
+        if dumpMacFrame(packet):
+            print(f"{message}")
+
+def mqtt_sub_callback(topic, message):
+    global sendFifo
+    now = time.ticks_ms()
+    elapsed = now - lastRx
+    jsonMessage = json.loads(message.decode('utf-8'))
+    print(f"Current delay {elapsed} ms")
+    for item in jsonMessage['items']:
+        sendFifo.append(item)
+        delay = int(item['txInfo']['timing']['delay']['delay'][0])
+        Timer(mode=Timer.ONE_SHOT, period=delay*1000 - elapsed - 20, callback=sendNextOnFifo)
+    print(f'Scheduled {len(sendFifo)} messages for future delivery')
+
+# Connect to network and initialize ntp
+mm_wlan.connect_to_network('JWMFIBER', 'gopack00')
+print("Trying to set time via NTP")
+while True:
+    try:
+        ntptime.settime()
+        print(f"Current time: {getFormattedTime(rtc.datetime())}")
+        break
+    except Exception as e:
+        print(f"NTP failed with {e}")
 
 
-def main():
-    print("Initializing...")
-    modem = get_modem()
-    modem._reg_write(0x39, 0x34)
+print("Setting up MQTT client")
+mqtt_client = MQTTClient(server='192.168.87.57',
+                         client_id='picoGateway')
+mqtt_client.set_callback(mqtt_sub_callback)
+mqtt_client.connect()
+mqtt_client.subscribe('us915_0/gateway/+/command/down')
 
-    counter = 0
-    while True:
-        print("Sending...")
-        modem.send(f"Hello world from MicroPython side a #{counter}".encode())
-        dumpCfg(modem)
+# Setup forwarding
+sendsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+gwStatus = {'time': '',
+            'lati': 46.24,
+            'long': 3.2523,
+            'alti': 145,
+            'rxnb': 0,
+            'rxok': 0,
+            'rxfw': 0,
+            'ackr': 100.0,
+            'dwnb': 0,
+            'txnb': 0}
+id = mm_wlan.getmac() + 2*b'\xff'
 
-        print("Receiving...")
-        modem._reg_write(0x9, 0xcf)
-        rx = modem.recv(timeout_ms=5000)
-        if rx:
-            dumpCfg(modem)
-            print(f"Received: {rx!r}")
-        else:
-            print("Timeout!")
-        #time.sleep(2)
-        counter += 1
+# initialise radio
+print("Initializing...")
+lora = get_modem()
+lora._reg_write(0x39, 0x34)
+
+while True:
+    lora.configure(lora_cfg)
+    print("Receiving...")
+    rx = lora.recv()
+    if rx:
+        if verbose:
+            dumpMacFrame(rx)
+            print(f'Received {len(rx)} byte packet at {rx.ticks_ms}ms, with SNR {rx.snr/4.0} RSSI {rx.rssi} valid_crc {rx.valid_crc}')
+        rawts = rtc.datetime()
+        ts = getFormattedTime(rawts)            
+        gwStatus['time'] = getFormattedTime(rawts, stat=True)
+        lastRx = rx.ticks_ms
+        fwd = {"rxpk": [{
+                   'time': ts,
+                   'tmms': (time.time() -  time.mktime((1980, 1, 6, 0, 0, 0, 0, 5)))*1000,
+                   'tmst': rx.ticks_ms,
+                   'freq': lora_cfg['freq_khz']/1000.0,
+                   'chan': 0,
+                   'rfch': 0,
+                   'stat': 1,
+                   'modu': 'LORA',
+                   'datr': 'SF10BW125',
+                   'codr': '4/5',
+                   'rssi': int(rx.rssi),
+                   'lsnr': rx.snr/4.0,
+                   'size': len(rx),
+                   'data': ubinascii.b2a_base64(rx).strip()
+                   }],
+                   "stat": gwStatus}
+            
+        gwPacket = struct.pack('!BHB8s', 2, gwStatus['rxfw'], 0, id)
+        gwPacket += bytes(json.dumps(fwd), 'utf-8')
+        sendsock.sendto(gwPacket, (serverIp, server_port_up))
+        print("Waiting for response from server . . .")
+        (response, address) = sendsock.recvfrom(4)
+        print(f"Received {response}")
+        gwStatus['rxok'] += 1            
+        gwStatus['rxfw'] += 1
+
+        # Now wait for reply instructions!
+        #
+        time.sleep_ms(300)
+        if (mqtt_client.check_msg()):
+            #print("waiting?")
+            #mqtt_client.wait_msg()
+
+            # Poll for completion
+            while len(sendFifo):
+                time.sleep_ms(10)
 
 
-if __name__ == "__main__":
-    main()
+    else:
+        print("Timeout!")
+        continue
+
+
+# ulora.dumpCfg(lora)
+
+# loop and wait for data
+
+#while True:
+#    lora.process()
+#    mqtt_client.wait_msg()
+#    sleep(0.1)
